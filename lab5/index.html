@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Web LLM Client</title>
+    <style>
+        :root { --primary: #2563eb; --bg: #f1f5f9; --chat-bg: #ffffff; --sidebar: #1e293b; --text-light: #f8fafc; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: var(--bg); display: flex; justify-content: center; height: 100vh; margin: 0; overflow: hidden; }
+        .app-wrapper { width: 100%; max-width: 1200px; display: grid; grid-template-columns: 260px 1fr; height: 100vh; background: var(--chat-bg); box-shadow: 0 0 20px rgba(0,0,0,0.1); }
+        
+        .sidebar { background: var(--sidebar); color: var(--text-light); display: flex; flex-direction: column; padding: 20px; border-right: 1px solid #334155; }
+        .new-chat-btn { background: var(--primary); color: white; padding: 12px; border: none; border-radius: 8px; cursor: pointer; width: 100%; font-weight: 600; margin-bottom: 20px; transition: 0.2s; }
+        .new-chat-btn:hover { background: #1d4ed8; }
+        .history-list { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
+        .history-item { padding: 10px; background: #334155; border-radius: 6px; cursor: pointer; font-size: 0.9rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; transition: 0.2s; color: #cbd5e1; }
+        .history-item:hover { background: #475569; color: white; }
+        .history-item.active { background: #475569; border-left: 3px solid var(--primary); }
+
+        .main-content { display: flex; flex-direction: column; height: 100%; position: relative; }
+        
+        .settings-bar { padding: 15px 20px; background: #fff; border-bottom: 1px solid #e2e8f0; display: flex; justify-content: space-between; align-items: center; }
+        .range-wrap { display: flex; align-items: center; gap: 10px; font-size: 0.9rem; color: #475569; }
+        
+        #chat-box { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 15px; scroll-behavior: smooth; background: #f8fafc; }
+        .msg { padding: 12px 18px; border-radius: 12px; max-width: 75%; line-height: 1.6; word-wrap: break-word; font-size: 0.95rem; }
+        .user { background: var(--primary); color: white; align-self: flex-end; border-bottom-right-radius: 2px; }
+        .ai { background: white; color: #1e293b; align-self: flex-start; border-bottom-left-radius: 2px; border: 1px solid #e2e8f0; box-shadow: 0 2px 4px rgba(0,0,0,0.02); }
+        .error { background: #fee2e2; color: #991b1b; align-self: center; border: 1px solid #fca5a5; }
+
+        .input-area { padding: 20px; background: white; border-top: 1px solid #e2e8f0; display: flex; gap: 12px; }
+        input[type="text"] { flex: 1; padding: 14px; border: 1px solid #cbd5e1; border-radius: 8px; outline: none; font-size: 1rem; transition: 0.2s; }
+        input[type="text"]:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1); }
+        #send-btn { padding: 0 24px; background: var(--primary); color: white; border: none; border-radius: 8px; font-weight: 600; cursor: pointer; transition: 0.2s; }
+        #send-btn:hover { background: #1d4ed8; }
+        #send-btn:disabled { background: #94a3b8; cursor: not-allowed; }
+
+        @media (max-width: 768px) {
+            .app-wrapper { grid-template-columns: 1fr; }
+            .sidebar { display: none; }
+        }
+    </style>
+</head>
+<body>
+
+<div class="app-wrapper">
+    <aside class="sidebar">
+        <button class="new-chat-btn" onclick="startNewChat()">+ Новый чат</button>
+        <div class="history-list" id="history-list"></div>
+    </aside>
+
+    <main class="main-content">
+        <div class="settings-bar">
+            <div class="range-wrap">
+                <span>Модель: <b>ministral-3</b></span>
+            </div>
+            <div class="range-wrap">
+                <label>Температура: <span id="temp-val">0.7</span></label>
+                <input type="range" id="temp-slider" min="0" max="1" step="0.1" value="0.7">
+            </div>
+        </div>
+
+        <div id="chat-box"></div>
+
+        <div class="input-area">
+            <input type="text" id="user-input" placeholder="Введите сообщение..." autocomplete="off">
+            <button id="send-btn">Отправить</button>
+        </div>
+    </main>
+</div>
+
+<script>
+    const chatBox = document.getElementById('chat-box');
+    const userInput = document.getElementById('user-input');
+    const sendBtn = document.getElementById('send-btn');
+    const tempSlider = document.getElementById('temp-slider');
+    const tempVal = document.getElementById('temp-val');
+    const historyListEl = document.getElementById('history-list');
+
+    const MODEL_NAME = "ministral-3";
+    const STORAGE_KEY = "ollama_chat_history_v1";
+
+    let currentChatId = null;
+    let chats = JSON.parse(localStorage.getItem(STORAGE_KEY)) || {};
+
+    tempSlider.oninput = () => tempVal.textContent = tempSlider.value;
+
+    function saveToStorage() {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(chats));
+        renderHistoryList();
+    }
+
+    function generateId() {
+        return Date.now().toString(36) + Math.random().toString(36).substr(2);
+    }
+
+    function renderHistoryList() {
+        historyListEl.innerHTML = '';
+        const sortedIds = Object.keys(chats).sort((a, b) => chats[b].timestamp - chats[a].timestamp);
+        
+        sortedIds.forEach(id => {
+            const chat = chats[id];
+            const div = document.createElement('div');
+            div.className = `history-item ${id === currentChatId ? 'active' : ''}`;
+            div.textContent = chat.title || 'Новый чат';
+            div.onclick = () => loadChat(id);
+            historyListEl.appendChild(div);
+        });
+    }
+
+    function startNewChat() {
+        currentChatId = generateId();
+        chats[currentChatId] = {
+            id: currentChatId,
+            title: 'Новый чат',
+            timestamp: Date.now(),
+            messages: []
+        };
+        chatBox.innerHTML = '';
+        renderHistoryList();
+        userInput.focus();
+    }
+
+    function loadChat(id) {
+        currentChatId = id;
+        const chat = chats[id];
+        chatBox.innerHTML = '';
+        chat.messages.forEach(msg => appendMessageUI(msg.content, msg.role));
+        renderHistoryList();
+    }
+
+    function appendMessageUI(text, role) {
+        const div = document.createElement('div');
+        div.className = `msg ${role}`;
+        div.textContent = text;
+        chatBox.appendChild(div);
+        chatBox.scrollTop = chatBox.scrollHeight;
+    }
+
+    async function sendMessage() {
+        const text = userInput.value.trim();
+        if (!text) return;
+
+        if (!currentChatId) startNewChat();
+
+        appendMessageUI(text, 'user');
+        userInput.value = '';
+        userInput.disabled = true;
+        sendBtn.disabled = true;
+
+        const currentChat = chats[currentChatId];
+        currentChat.messages.push({ role: "user", content: text });
+        
+        if (currentChat.messages.length === 1) {
+            currentChat.title = text.slice(0, 30) + (text.length > 30 ? '...' : '');
+        }
+        currentChat.timestamp = Date.now();
+        saveToStorage();
+
+        try {
+            const response = await fetch('http://localhost:11434/api/chat', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    model: MODEL_NAME,
+                    messages: currentChat.messages,
+                    stream: false,
+                    options: { temperature: parseFloat(tempSlider.value) }
+                })
+            });
+
+            if (!response.ok) throw new Error(`Status: ${response.status}`);
+
+            const data = await response.json();
+            const aiText = data.message.content;
+
+            appendMessageUI(aiText, 'ai');
+            currentChat.messages.push({ role: "assistant", content: aiText });
+            saveToStorage();
+
+        } catch (err) {
+            console.error(err);
+            appendMessageUI("Ошибка подключения к Ollama", 'error');
+        } finally {
+            userInput.disabled = false;
+            sendBtn.disabled = false;
+            userInput.focus();
+        }
+    }
+
+    sendBtn.onclick = sendMessage;
+    userInput.onkeypress = (e) => { if(e.key === 'Enter') sendMessage(); };
+
+    if (Object.keys(chats).length > 0) {
+        loadChat(Object.keys(chats)[Object.keys(chats).length - 1]);
+    } else {
+        startNewChat();
+    }
+</script>
+
+</body>
+</html>
